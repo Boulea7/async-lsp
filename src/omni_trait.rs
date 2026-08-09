@@ -91,13 +91,11 @@ macro_rules! define_server {
 
             // Requests.
 
-            #[must_use]
             fn initialize(
                 &mut self,
                 params: <request::Initialize as Request>::Params,
             ) -> ResponseFuture<request::Initialize, Self::Error>;
 
-            #[must_use]
             fn shutdown(
                 &mut self,
                 (): <request::Shutdown as Request>::Params,
@@ -106,7 +104,6 @@ macro_rules! define_server {
             }
 
             $(
-            #[must_use]
             fn $req_snake(
                 &mut self,
                 params: <$req as Request>::Params,
@@ -118,7 +115,6 @@ macro_rules! define_server {
 
             // Notifications.
 
-            #[must_use]
             fn initialized(
                 &mut self,
                 params: <notification::Initialized as Notification>::Params,
@@ -127,7 +123,6 @@ macro_rules! define_server {
                 Self::NotifyResult::fallback::<notification::Initialized>()
             }
 
-            #[must_use]
             fn exit(
                 &mut self,
                 (): <notification::Exit as Notification>::Params,
@@ -136,7 +131,6 @@ macro_rules! define_server {
             }
 
             $(
-            #[must_use]
             fn $notif_snake(
                 &mut self,
                 params: <$notif as Notification>::Params,
@@ -255,7 +249,6 @@ macro_rules! define_client {
 
             // Requests.
             $(
-            #[must_use]
             fn $req_snake(
                 &mut self,
                 params: <$req as Request>::Params,
@@ -267,7 +260,6 @@ macro_rules! define_client {
 
             // Notifications.
             $(
-            #[must_use]
             fn $notif_snake(
                 &mut self,
                 params: <$notif as Notification>::Params,
