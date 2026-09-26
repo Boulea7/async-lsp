@@ -27,20 +27,33 @@ enum ExitBehavior {
 }
 
 type MainLoopTask = JoinHandle<Result<()>>;
-type TestSession = (ServerSocket, Arc<AtomicUsize>, MainLoopTask, MainLoopTask);
+
+#[derive(Default)]
+struct NotificationCounts {
+    initialized: AtomicUsize,
+    did_open: AtomicUsize,
+}
+
+type TestSession = (ServerSocket, Arc<NotificationCounts>, MainLoopTask, MainLoopTask);
 
 fn start(exit_behavior: ExitBehavior) -> TestSession {
-    let did_open_count = Arc::new(AtomicUsize::new(0));
-    let count = did_open_count.clone();
+    let counts = Arc::new(NotificationCounts::default());
+    let initialized_counts = counts.clone();
+    let did_open_counts = counts.clone();
     let (server_main, server_socket) = MainLoop::new_server(move |_client| {
         let mut router = Router::new(());
         router
             .request::<request::Initialize, _>(|_, _| async { Ok(InitializeResult::default()) })
             .request::<request::WorkspaceConfiguration, _>(|_, _| async { Ok(Vec::new()) })
             .request::<request::Shutdown, _>(|_, _| async { Ok(()) })
-            .notification::<notification::Initialized>(|_, _| ControlFlow::Continue(()))
+            .notification::<notification::Initialized>(move |_, _| {
+                initialized_counts
+                    .initialized
+                    .fetch_add(1, Ordering::SeqCst);
+                ControlFlow::Continue(())
+            })
             .notification::<notification::DidOpenTextDocument>(move |_, _| {
-                count.fetch_add(1, Ordering::SeqCst);
+                did_open_counts.did_open.fetch_add(1, Ordering::SeqCst);
                 ControlFlow::Continue(())
             })
             .notification::<notification::Exit>(move |_, _| match exit_behavior {
@@ -64,7 +77,7 @@ fn start(exit_behavior: ExitBehavior) -> TestSession {
     });
     let (client_rx, client_tx) = client_stream.compat().split();
     let client_task = tokio::spawn(client_main.run_buffered(client_rx, client_tx));
-    (client, did_open_count, server_task, client_task)
+    (client, counts, server_task, client_task)
 }
 
 async fn initialize(client: &ServerSocket) {
@@ -112,7 +125,7 @@ async fn server_result(server_task: MainLoopTask) -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn lifecycle_filters_messages_until_initialized() {
-    let (client, did_open_count, server_task, client_task) = start(ExitBehavior::Continue);
+    let (client, counts, server_task, client_task) = start(ExitBehavior::Continue);
 
     let error = client
         .request::<request::WorkspaceConfiguration>(ConfigurationParams { items: Vec::new() })
@@ -126,7 +139,7 @@ async fn lifecycle_filters_messages_until_initialized() {
         .request::<request::Initialize>(Default::default())
         .await
         .unwrap();
-    assert_eq!(did_open_count.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.did_open.load(Ordering::SeqCst), 0);
 
     let error = client
         .request::<request::Initialize>(Default::default())
@@ -143,7 +156,7 @@ async fn lifecycle_filters_messages_until_initialized() {
     assert!(
         matches!(error, Error::Response(response) if response.code == ErrorCode::SERVER_NOT_INITIALIZED)
     );
-    assert_eq!(did_open_count.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.did_open.load(Ordering::SeqCst), 0);
 
     client
         .notify::<notification::Initialized>(InitializedParams {})
@@ -153,7 +166,7 @@ async fn lifecycle_filters_messages_until_initialized() {
         .request::<request::WorkspaceConfiguration>(ConfigurationParams { items: Vec::new() })
         .await
         .unwrap();
-    assert_eq!(did_open_count.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.did_open.load(Ordering::SeqCst), 1);
     let error = client
         .request::<request::Initialize>(Default::default())
         .await
@@ -169,16 +182,27 @@ async fn lifecycle_filters_messages_until_initialized() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn initialized_before_initialize_is_a_protocol_error() {
-    let (client, did_open_count, server_task, client_task) = start(ExitBehavior::Continue);
+async fn initialized_before_initialize_is_ignored() {
+    let (client, counts, server_task, client_task) = start(ExitBehavior::Continue);
     client
         .notify::<notification::Initialized>(InitializedParams {})
         .unwrap();
-    assert!(matches!(
-        server_result(server_task).await,
-        Err(Error::Protocol(_))
-    ));
-    assert_eq!(did_open_count.load(Ordering::SeqCst), 0);
+    client
+        .request::<request::Initialize>(Default::default())
+        .await
+        .unwrap();
+    assert_eq!(counts.initialized.load(Ordering::SeqCst), 0);
+    client
+        .notify::<notification::Initialized>(InitializedParams {})
+        .unwrap();
+    client
+        .request::<request::WorkspaceConfiguration>(ConfigurationParams { items: Vec::new() })
+        .await
+        .unwrap();
+    assert_eq!(counts.initialized.load(Ordering::SeqCst), 1);
+    client.request::<request::Shutdown>(()).await.unwrap();
+    client.notify::<notification::Exit>(()).unwrap();
+    server_result(server_task).await.unwrap();
     assert_client_eof(client_task).await;
 }
 
@@ -197,17 +221,17 @@ async fn duplicate_initialized_is_a_protocol_error() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn initialized_after_shutdown_is_a_protocol_error() {
-    let (client, _, server_task, client_task) = start(ExitBehavior::Continue);
+async fn initialized_after_shutdown_is_ignored() {
+    let (client, counts, server_task, client_task) = start(ExitBehavior::Continue);
     initialize(&client).await;
     client.request::<request::Shutdown>(()).await.unwrap();
+    assert_eq!(counts.initialized.load(Ordering::SeqCst), 1);
     client
         .notify::<notification::Initialized>(InitializedParams {})
         .unwrap();
-    assert!(matches!(
-        server_result(server_task).await,
-        Err(Error::Protocol(_))
-    ));
+    client.notify::<notification::Exit>(()).unwrap();
+    server_result(server_task).await.unwrap();
+    assert_eq!(counts.initialized.load(Ordering::SeqCst), 1);
     assert_client_eof(client_task).await;
 }
 
@@ -228,7 +252,7 @@ async fn exit_before_shutdown_uses_a_protocol_error_by_default() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_rejects_later_requests_and_ignores_notifications() {
-    let (client, did_open_count, server_task, client_task) = start(ExitBehavior::Continue);
+    let (client, counts, server_task, client_task) = start(ExitBehavior::Continue);
     initialize(&client).await;
     client.request::<request::Shutdown>(()).await.unwrap();
 
@@ -246,7 +270,7 @@ async fn shutdown_rejects_later_requests_and_ignores_notifications() {
     did_open(&client);
     client.notify::<notification::Exit>(()).unwrap();
     server_result(server_task).await.unwrap();
-    assert_eq!(did_open_count.load(Ordering::SeqCst), 0);
+    assert_eq!(counts.did_open.load(Ordering::SeqCst), 0);
     assert_client_eof(client_task).await;
 }
 

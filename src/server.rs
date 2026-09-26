@@ -147,7 +147,7 @@ where
                 self.state = State::Ready;
                 self.service.notify(notif)
             }
-            (_, notification::Initialized::METHOD) => {
+            (State::Ready, notification::Initialized::METHOD) => {
                 self.warn_unexpected_message("notification", &notif.method);
                 ControlFlow::Break(Err(Error::Protocol(format!(
                     "Unexpected initialized notification on state {:?}",
