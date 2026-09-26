@@ -130,16 +130,18 @@ where
 {
     fn notify(&mut self, notif: AnyNotification) -> ControlFlow<Result<()>> {
         match (self.state, &*notif.method) {
-            (State::ShuttingDown, notification::Exit::METHOD) => {
-                self.service.notify(notif)?;
-                ControlFlow::Break(Ok(()))
-            }
             (_, notification::Exit::METHOD) => {
-                self.warn_unexpected_message("notification", &notif.method);
+                let state = self.state;
+                if state != State::ShuttingDown {
+                    self.warn_unexpected_message("notification", &notif.method);
+                }
                 self.service.notify(notif)?;
-                ControlFlow::Break(Err(Error::Protocol(
-                    "Exit notification received before shutdown".into(),
-                )))
+                ControlFlow::Break(match state {
+                    State::ShuttingDown => Ok(()),
+                    _ => Err(Error::Protocol(
+                        "Exit notification received before shutdown".into(),
+                    )),
+                })
             }
             (State::Initializing, notification::Initialized::METHOD) => {
                 self.state = State::Ready;
